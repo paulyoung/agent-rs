@@ -7,6 +7,7 @@
 //! cf https://docs.dfinity.systems/public/v/0.13.1/#_encoding_of_certificates
 use openssl::sha::Sha256;
 use serde::{Deserialize, Serialize, Serializer};
+use std::borrow::Cow;
 use std::convert::TryFrom;
 
 /// Type alias for a sha256 result (ie. a u256).
@@ -41,10 +42,15 @@ where
 
 impl std::fmt::Display for Label {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use std::fmt::Write;
+
         // Try to print it as an UTF-8 string. If an error happens, print the bytes
         // as hexadecimal.
         match std::str::from_utf8(self.as_bytes()) {
-            Ok(s) => f.write_str(s),
+            Ok(s) => {
+                f.write_str(s)?;
+                f.write_char('"')
+            }
             Err(_) => {
                 write!(f, "0x")?;
                 std::fmt::Debug::fmt(self, f)
@@ -90,14 +96,54 @@ pub enum LookupResult<'tree> {
 
 /// A HashTree representing a full tree.
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub struct HashTree {
-    root: HashTreeNode,
+pub struct HashTree<'a> {
+    root: HashTreeNode<'a>,
 }
 
-impl HashTree {
+#[allow(dead_code)]
+impl<'a> HashTree<'a> {
+    /// Create an empty hash tree.
+    #[inline]
+    pub fn empty() -> Self {
+        Self {
+            root: HashTreeNode::Empty(),
+        }
+    }
+
+    /// Create a forked tree from two trees or node.
+    #[inline]
+    pub fn fork<L: Into<HashTreeNode<'a>>, R: Into<HashTreeNode<'a>>>(left: L, right: R) -> Self {
+        Self {
+            root: HashTreeNode::Fork(Box::new((left.root.into(), right.root.into()))),
+        }
+    }
+
+    /// Create a labeled hash tree.
+    #[inline]
+    pub fn labeled<L: Into<Cow<'a, Label>>, N: Into<HashTreeNode<'a>>>(label: L, node: N) -> Self {
+        Self {
+            root: HashTreeNode::Labeled(label.into(), Box::new(node.into())),
+        }
+    }
+
+    /// Create a leaf in the tree.
+    #[inline]
+    pub fn leaf<L: Into<Cow<'a, [u8]>>>(leaf: L) -> Self {
+        Self {
+            root: HashTreeNode::Leaf(leaf.into()),
+        }
+    }
+
+    /// Create a pruned tree node.
+    #[inline]
+    pub fn pruned<C: Into<Cow<'a, Sha256Digest>>>(content: C) -> Self {
+        Self {
+            root: HashTreeNode::Pruned(content),
+        }
+    }
+
     /// Recomputes root hash of the full tree that this hash tree was constructed from.
     #[inline]
-    #[allow(dead_code)]
     pub fn digest(&self) -> Sha256Digest {
         self.root.digest()
     }
@@ -112,7 +158,19 @@ impl HashTree {
     }
 }
 
-impl Serialize for HashTree {
+impl<'a> AsRef<HashTreeNode<'a>> for HashTree<'a> {
+    fn as_ref(&self) -> &HashTreeNode<'a> {
+        &self.root
+    }
+}
+
+impl<'a> Into<HashTreeNode<'a>> for HashTree<'a> {
+    fn into(self) -> HashTreeNode<'a> {
+        self.root
+    }
+}
+
+impl Serialize for HashTree<'_> {
     fn serialize<S>(&self, serializer: S) -> Result<<S as Serializer>::Ok, <S as Serializer>::Error>
     where
         S: Serializer,
@@ -121,7 +179,7 @@ impl Serialize for HashTree {
     }
 }
 
-impl<'de> serde::Deserialize<'de> for HashTree {
+impl<'de> serde::Deserialize<'de> for HashTree<'_> {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
@@ -145,20 +203,20 @@ enum LookupLabelResult<'node> {
     Continue,
 
     /// The label was found. Contains a reference to the [HashTreeNode].
-    Found(&'node HashTreeNode),
+    Found(&'node HashTreeNode<'node>),
 }
 
 /// A Node in the HashTree.
 #[derive(Clone, PartialEq, Eq)]
-pub(crate) enum HashTreeNode {
+pub(crate) enum HashTreeNode<'a> {
     Empty(),
-    Fork(Box<(HashTreeNode, HashTreeNode)>),
-    Labeled(Label, Box<HashTreeNode>),
-    Leaf(Vec<u8>),
-    Pruned(Sha256Digest),
+    Fork(Box<(HashTreeNode<'a>, HashTreeNode<'a>)>),
+    Labeled(Cow<'a, Label>, Box<HashTreeNode<'a>>),
+    Leaf(Cow<'a, [u8]>),
+    Pruned(Cow<'a, Sha256Digest>),
 }
 
-impl std::fmt::Debug for HashTreeNode {
+impl std::fmt::Debug for HashTreeNode<'_> {
     // Shows a nicer view to debug than the default debugger.
     // Example:
     //
@@ -219,7 +277,7 @@ impl std::fmt::Debug for HashTreeNode {
     }
 }
 
-impl HashTreeNode {
+impl HashTreeNode<'_> {
     /// Update a hasher with the domain separator (byte(|s|) . s).
     #[inline]
     fn domain_sep(&self, hasher: &mut Sha256) {
@@ -339,7 +397,7 @@ impl HashTreeNode {
     }
 }
 
-impl serde::Serialize for HashTreeNode {
+impl serde::Serialize for HashTreeNode<'_> {
     // Serialize a `MixedHashTree` per the CDDL of the public spec.
     // See https://docs.dfinity.systems/public/certificates.cddl
     fn serialize<S>(&self, serializer: S) -> Result<<S as Serializer>::Ok, <S as Serializer>::Error>
@@ -385,7 +443,7 @@ impl serde::Serialize for HashTreeNode {
     }
 }
 
-impl<'de> serde::Deserialize<'de> for HashTreeNode {
+impl<'de> serde::Deserialize<'de> for HashTreeNode<'_> {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
@@ -395,7 +453,7 @@ impl<'de> serde::Deserialize<'de> for HashTreeNode {
         struct SeqVisitor;
 
         impl<'de> de::Visitor<'de> for SeqVisitor {
-            type Value = HashTreeNode;
+            type Value = HashTreeNode<'de>;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
                 formatter.write_str(
@@ -446,7 +504,7 @@ impl<'de> serde::Deserialize<'de> for HashTreeNode {
                             return Err(de::Error::invalid_length(4, &self));
                         }
 
-                        Ok(HashTreeNode::Labeled(label, Box::new(subtree)))
+                        Ok(HashTreeNode::Labeled(Cow::Owned(label), Box::new(subtree)))
                     }
                     3 => {
                         let bytes: serde_bytes::ByteBuf = seq

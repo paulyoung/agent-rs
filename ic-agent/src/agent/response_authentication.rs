@@ -133,10 +133,10 @@ pub(crate) fn lookup_reply(
     Ok(RequestStatusResponse::Replied { reply })
 }
 
-pub(crate) fn lookup_value(
-    certificate: &Certificate,
+pub(crate) fn lookup_value<'a>(
+    certificate: &'_ Certificate<'a>,
     path: Vec<Label>,
-) -> Result<&[u8], AgentError> {
+) -> Result<&'a [u8], AgentError> {
     match certificate.tree.lookup_path(&path) {
         LookupResult::Absent => Err(AgentError::LookupPathAbsent(path)),
         LookupResult::Unknown => Err(AgentError::LookupPathUnknown(path)),
